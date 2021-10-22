@@ -1,0 +1,396 @@
+---
+title: "Budweiser Data Analysis"
+author: "Jasmine O'Neal and Connor Dobbs"
+date: "10/10/2021"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      fig.width = 10, 
+                      fig.asp = 0.618, 
+                      out.width = "100%", 
+                      fig.align = "center", 
+                      message = FALSE, 
+                      warning = FALSE)
+```
+
+# Introduction:
+
+### The CEO and CFO of Budweiser have tasked outside consultants Jasmine O'Neal and Connor Dobbs to investigate the current landscape of the budding craft beer industry in the U.S.
+
+### We've been provided relevant data about the beers made by different breweries to aid our analysis.
+
+### With the growing popularity of independent breweries, the Budweiser team has outlined a few goals to achieve with our analysis that will help them find opportunities to get into this market.
+
+ 1. Find out brewery locations across U.S.
+ 1. Determine alcohol content and international bitterness unit of the beers from each state
+ 1. Determine if there is a relationship between alcohol content and bitterness
+ 1. What differences exist between Ale's and IPA's with respect to alcohol content and bitterness
+ 1. Find other relevant insights from analysis 
+ 
+### Additional questions can be directed towards dobbs@smu.edu or jasmineo@smu.edu
+
+# Tools
+
+### This analysis uses R to ingest the Beers and Breweries csv datasets to answer these high-level questions outlined above. Also leveraged were ggplot2 visualization capabilities for charting and exploring the data.
+
+### Statistical methods were also used, such as KNN classification, linear regression checks, and ANOVA testing to identify things such as whether a certain beer is an Ale or IPA or to check for correlation between diversity of local beer offerings and overall beer consumption.
+
+``` {r libraries, include = FALSE}
+# Load libraries necessary to analyze datasets
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(class)
+library(caret)
+library(e1071)
+library(stringi)
+library(stringr)
+library(tidyverse)
+library(skimr)
+library(GGally)
+library(ggthemes)
+```
+# Purpose of the following Code:
+
+### Given the Beers and Breweries datasets from the CEO and CFO of Budweiser, we've been tasked to analyze some initial questions.
+
+### The following code will display those questions and answers in addition to other insights derived from that analysis.
+
+# Q1. How many breweries are present in each state?
+
+### Only 19 States had 10 or more unique breweries and Colorado has the most unique breweries at 47. See below for the full table and heatmap:
+
+*Please note, the number of breweries present in each state is based on the breweries listed in the Breweries.csv
+
+``` {r 1}
+# Read Breweries csv
+breweries = read.csv('Data/breweries.csv', header = TRUE)
+
+# Change Brew_ID to brewery_id in Breweries
+colnames(breweries)[1] <- "Brewery_id"
+
+# Breweries in each state
+breweries %>%
+  count(State) %>%
+  arrange(desc(n))
+
+# bar chart
+breweries$State = as.factor(breweries$State)
+breweries %>% 
+  mutate(State = fct_reorder(State, State, 'length', .desc = TRUE)) %>% 
+  ggplot(aes(x = State)) + geom_bar(fill = 'red', color = 'black') + theme_economist_white() +
+  theme(legend.position = 'none') + ylab('Count of Breweries') + ggtitle('Total Breweries per State') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+# map
+breweries$State = trimws(breweries$State)
+lookup = data.frame(abb = state.abb, State = state.name) #makes a data frame with State name and abbreviation. 
+colnames(breweries)[4] = "abb" # Change Column Name
+breweries = merge(breweries,lookup,'abb') # make one dataset with state names and abb
+breweriesMapData = count(breweries,State) #count up the occurance of each state. 
+colnames(breweriesMapData)[2] = "Breweries" #change "n" to "Breweries"
+breweriesMapData$region <- tolower(breweriesMapData$State) 
+breweriesMapData2 = breweriesMapData[-1] #drop capitalized column
+
+states <- map_data("state")
+map.df <- merge(states,breweriesMapData, by="region", all.x=T) #merge map data to df
+map.df <- map.df[order(map.df$order),]
+ggplot(map.df, aes(x=long,y=lat,group=group))+
+  geom_polygon(aes(fill=Breweries))+
+  geom_path()+ 
+  scale_fill_gradientn(colours=rev(heat.colors(10)),na.value="grey90")+ggtitle("Breweries by State") +
+coord_map()
+```
+
+# Q2. Merge beer data with breweries data. Print the first and last 6 observations to check the merged file.
+
+``` {r 2}
+# Read Beers csv
+beers = read.csv('Data/beers.csv', header = TRUE)
+
+# Merge Beers and Breweries Data
+final = left_join(beers, breweries, by = "Brewery_id")
+
+# Formatting after merge
+final$State = trimws(final$State) # Remove Spaces from State
+final$State = as.factor(final$State) # Make State factor
+final = rename(final, Beer_Name = Name.x) # Rename Name columns
+final = rename(final, Brewery_Name = Name.y)
+
+# Print First 6 observations
+head(final, n = 6)
+
+# Print Last 6 observations
+tail(final, n = 6)
+```
+
+# Q3. Address the missing values in each column.
+
+### There were roughly 1000 missing IBU values for beers across the country and 62 missing ABV values. It was determined that the best way to approach this was to remove the missing values after checking to make sure the missing values appeared close-to-randomly scattered across states. This allows for the assumption that the remaining dataset is still representative.
+
+``` {r 3}
+# Sum of missing data values in each column
+colSums(is.na(final))
+
+# Return missing IBU values by State
+final %>%
+  filter(is.na(IBU)) %>%
+  count(State) %>%
+  arrange(desc(n))
+
+# Remove missing IBU values 
+final = na.omit(final, cols=c("IBU"))
+
+# Sum of missing data values in each column after removing missing IBU
+colSums(is.na(final))
+```
+
+# Q4. Compute the median alcohol content and international bitterness unit for each state. Plot a bar chart to compare.
+
+### The Median Alcohol content of beer varieties are fairly level between most states, Utah unsurprisingly has the lowest due to legal limit of 4% by weight. Bitterness varies more, with Maine more than tripling the lowest median bitterness state, Wisconsin.
+
+``` {r 4}
+# Median ABV by State
+# Display Median Alcohol Content by State
+final$State <- fct_reorder(final$State, final$ABV, 'median', .desc = TRUE)
+final %>%
+  group_by(State) %>%
+  summarize(Median_ABV = median(ABV)) %>%
+  ggplot(aes(x = State, y = Median_ABV)) + theme_economist_white() +
+  geom_bar(stat = "identity", color = "black", aes(fill = Median_ABV)) +
+  scale_fill_gradient2(low='white', mid='snow', high='red') +
+  ggtitle("Median Alcohol Content by State") +
+  ylab("Alcohol Content") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = 'none')
+
+# Median IBU by State
+# Display Median IBU by State
+final$State <- fct_reorder(final$State, final$IBU, 'median', .desc = TRUE)
+final %>%
+  group_by(State) %>%
+  summarize(Median_IBU = median(IBU)) %>%
+  ggplot(aes(x = State, y = Median_IBU)) + theme_economist_white() +
+  geom_bar(stat = "identity", color = "black", aes(fill = Median_IBU)) +
+  scale_fill_gradient2(low='white', mid='snow', high='red') +
+  ggtitle("Median IBU by State") +
+  ylab("IBU") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)) +
+  theme(legend.position = 'none')
+```
+
+# Q5. Which state has the maximum alcoholic (ABV) beer? Which state has the most bitter (IBU) beer?
+
+### Against the Grain Brewery in Kentucky has the highest ABV beer offering at .125. Astoria Brewing Company in Oregon has the highest ABU beer offering at 138
+
+``` {r 5}
+# Kentucky has the highest ABV at 0.125
+max(final[,3]) 
+
+final %>%
+  select(Brewery_Name,Beer_Name,State, ABV) %>% 
+  filter(final$ABV == "0.125")
+
+# Oregon has the most bitter IBU at 138
+max(final[,4])
+
+final %>%
+  select(Brewery_Name,Beer_Name,State, IBU) %>% 
+  filter(final$IBU == "138")
+```
+
+# Q6. Comment on the summary statistics and distribution of the ABV variable.
+
+### The lowest ABV is 0.027 compared to the highest at 0.125
+### The median and mean are relatively close with minimal variance at 0.057 and 0.059 respectively
+### Half of the values fall between .05 and .068
+### The distribution has a slight right skew
+
+
+``` {r 6}
+# Summary stats ABV
+summary(final$ABV)
+
+# Distribution of ABV
+final %>%
+  ggplot(aes(x = ABV)) +
+  geom_histogram(bins = 100, fill = 'yellow', color = 'black') +
+  ggtitle("ABV Distribution") +
+  theme_economist_white()
+```
+
+# Q7. Is there an apparent relationship between the bitterness of the beer and its alcoholic content? Draw a scatterplot. Make your best judgment of a relationship.
+
+### Based on the plot there's an apparent relationship indicating the higher the alcohol content the more bitter the beer is, as expected. Interestingly, the relationship appears to be strongest between about .05 and .08 ABV. 
+
+``` {r 7}
+# Relationship between bitterness and alcohol content
+ggplot(data = final) +
+  geom_point(aes(x = ABV, y = IBU, color = IBU), position = "jitter") +
+  geom_smooth(aes(x = ABV, y = IBU, color = IBU)) +
+  ggtitle("Relationship Between Bitterness and Alcohol Content") + theme_economist_white()
+```
+
+# Q8. Investigate the difference with respect to IBU and ABV between IPAs (Indian Pale Ales) and other types of Ale. Use KNN classification to investigate this relationship. Provide statistical evidence. Also supplement response with other methods or techniques.
+
+### The KNN classification model below will determine the probability of whether a given beer is an Ale or IPA based on the alchohol content and bitterness of the beer in question. By comparing a given unknown beers IBU and ABV to the 5 beers most similar in ABV and IBU, we were able to determine with 85% accuracy what the true Style is. The results are also consistent with the scatterplot that Ales tend to have lower IBU and ABV compared to IPAs.
+
+The following code explores some basic KNN models with various values of K, and then iterates 500 times through 90 values of K to find the optimal value to use to maximize accuracy. Finally there is a scatterplot for a visual check on the relationship. 
+``` {r 8}
+# KNN differences of IBU and ABV between IPAs and Ales
+# Create new dataframe and filter for IPAs and Ales
+IPA_Ale = final %>% filter(str_detect(Style, "IPA$") | str_detect(Style, "Ale$") | str_detect(Style, "(APA)"))
+
+# Change Style to Ale or IPA
+IPA_Ale$Style = gsub(".*Ale.*", "Ale", IPA_Ale$Style, ignore.case = FALSE)
+IPA_Ale$Style = gsub(".*IPA.*", "IPA", IPA_Ale$Style, ignore.case = FALSE)
+
+# Change Style to factor
+IPA_Ale$Style = as.factor(IPA_Ale$Style)
+
+# KNN of unknown beer with ABV of .05 and IBU of 28
+df = data.frame(ABV = .050 , IBU = 28 )
+knn(IPA_Ale[,c(3,4)], df, IPA_Ale$Style, k = 5, prob = TRUE)
+knn(IPA_Ale[,c(3,4)], df, IPA_Ale$Style, k = 15, prob = TRUE)
+knn(IPA_Ale[,c(3,4)], df, IPA_Ale$Style, k = 30, prob = TRUE)
+
+# KNN of unknown beer with ABV of .083 and IBU of 70
+df1 = data.frame(ABV = .083 , IBU = 70 )
+knn(IPA_Ale[,c(3,4)], df1, IPA_Ale$Style, k = 5, prob = TRUE)
+knn(IPA_Ale[,c(3,4)], df1, IPA_Ale$Style, k = 15, prob = TRUE)
+knn(IPA_Ale[,c(3,4)], df1, IPA_Ale$Style, k = 30, prob = TRUE)
+
+# Create training and test sets
+trainInd = sample(seq(1,921,1), .7*921)
+train = IPA_Ale[trainInd,]
+test = IPA_Ale[-trainInd,]
+
+# Testing with k of 5 and k of 15
+classifications = knn(train[,c(3,4)],test[,c(3,4)],train$Style, prob = TRUE, k = 5)
+confusionMatrix(table(classifications,test$Style))
+
+classifications = knn(train[,c(3,4)],test[,c(3,4)],train$Style, prob = TRUE, k = 15)
+confusionMatrix(table(classifications,test$Style))
+
+#  testing 90 values of K to find one with highest Accuracy. 
+set.seed(42)
+iterations = 500
+numks = 90
+splitPerc = .70
+
+masterAcc = matrix(nrow = iterations, ncol = numks)
+
+for(j in 1:iterations)
+{
+  trainIndices = sample(1:dim(IPA_Ale)[1],round(splitPerc * dim(IPA_Ale)[1]))
+  train = IPA_Ale[trainIndices,]
+  test = IPA_Ale[-trainIndices,]
+  for(i in 1:numks)
+  {
+    classifications = knn(train[,c(3,4)],test[,c(3,4)],train$Style, prob = TRUE, k = i)
+    table(classifications,test$Style)
+    CM = confusionMatrix(table(classifications,test$Style))
+    masterAcc[j,i] = CM$overall[1]
+  }
+  
+}
+MeanAcc = colMeans(masterAcc)
+
+#plot(seq(1,numks,1),MeanAcc, type = "l")
+
+which.max(MeanAcc)
+max(MeanAcc)
+
+# Scatterplot displaying differences between Ales and IPAs
+# Ales tend to have less alcohol and less bitter compared to IPAs
+ggplot(data = IPA_Ale) + 
+  geom_point(mapping = aes(x = ABV, y = IBU, color = Style)) + 
+  geom_smooth(aes(x = ABV, y = IBU, color = Style)) +
+  facet_wrap(~ Style) +
+  ggtitle("Difference Between Ales and IPA's")
+```
+
+# Q9. Find one other useful inference from the data that you feel Budweiser may be able to find value in.  You must convince them why it is important and back up your conviction with appropriate statistical evidence. 
+
+### Using data gathered by the National Institute on Alchol Abuse and Alcoholism, the number of types of beers offered by each state's breweries was compared to the overall beer consumption. This insight on what the best strategies moving forward might be, particularly if it is worth the cost of diversifying beer offerings or focusing on states that currently seem to prefer more "staple" brands and beers. 
+
+### In conclusion - there is not visual or statistical evidence to suggest correlation between volume of beer consumed per capita and the number of beers offered in the state - therefore the return of investement on developing, distributing, and marketing new types of beers to these State markets that could already be oversaturated is questionable. It also does not look like introducing new beer types to states that don't currently have a lot of local offerings would therefore increase consumption/sales. A better potential route would be to strategically expand based off states beer type preferences as mentioned earlier.
+
+
+The following code explores the relationships between Beer Consumption per Capita and the number of local beers offered in a State using heatmaps and scatterplots to check for a linear relationship. It then proceeds to try an ANOVA test, however the normality assumptions are violated.
+consumption data from: https://pubs.niaaa.nih.gov/publications/surveillance115/tab2_18.htm
+``` {r 9}
+# 9. Find another useful inference that Budweiser may be able to find value in.
+consumption <- read.csv('Data/consumption.csv', header = TRUE)
+consumption <- rename(consumption, region = ï..Region)
+consumption$Beer.Volume <- parse_number(consumption$Beer.Volume)
+
+# mapping
+final$State = trimws(final$State)
+lookup = data.frame(abb = state.abb, State = state.name) #makes a data frame with State name and abbreviation. 
+colnames(final)[11] = "State" # Change Column Name
+beerMapData = count(final,State) #count up the occurance of each state. 
+colnames(beerMapData)[2] = "Beers" #change "n" to "Beers"
+beerMapData$region <- tolower(beerMapData$State) 
+beerMapData = beerMapData[-1] #drop capitalized column
+
+states <- map_data("state")
+map.df <- merge(states,beerMapData, by="region", all.x=T) #merge map data to df
+map.df <- merge(map.df,consumption, by="region") #merge consumption data to df
+map.df <- map.df[order(map.df$order),]
+ggplot(map.df, aes(x=long,y=lat,group=group))+
+  geom_polygon(aes(fill=Beers))+
+  geom_path()+ 
+  scale_fill_gradientn(colours=rev(heat.colors(10)),na.value="grey90")+ggtitle("Beers by State") +
+coord_map()
+
+ggplot(map.df, aes(x=long,y=lat,group=group))+
+  geom_polygon(aes(fill=Beer.Per.Capita))+
+  geom_path()+ 
+  scale_fill_gradientn(colours=rev(heat.colors(10)),na.value="grey90")+ggtitle("Beer Consumption per Capita") +
+coord_map()
+
+ggplot(map.df, aes(x=long,y=lat,group=group))+
+  geom_polygon(aes(fill=All.Per.Capita))+
+  geom_path()+ 
+  scale_fill_gradientn(colours=rev(heat.colors(10)),na.value="grey90")+ggtitle("Alchohol Consumption per Capita") +
+coord_map()
+
+#scatterplot - no linear relationship relevant to be able to proceed with any sort of linear regression testing
+map.df %>% group_by(region) %>% ggplot(aes(x = Beer.Per.Capita, y = Beers)) + 
+  geom_point() + geom_smooth() + ggtitle('Beer Consumption Per Capita vs Unique Beer Offerings') +
+    xlab('Beer Consumption per Capita') + ylab('Unique Beer Offerings')
+
+#Explore ANOVA testing to test for difference in mean number of beers offered based on Beer Consumption per Capita
+df <- map.df %>% select(region,Beers,Beer.Volume,Beer.Per.Capita)
+df2 <- df[!duplicated(df$region),]
+
+#cut based on quartile
+df2$BeerCapita_Factor = cut(df2$Beer.Per.Capita, breaks = c(0,.947,1.08,1.22,2), labels = c("Low","Medium","High","Very High"))
+na.omit(df2) %>% group_by(BeerCapita_Factor) %>% skim(Beers)
+
+#aov to test if there is any difference in mean total beers by quartile of beer per capita consumption, however needed assumptions are not met (Normality violated with small number of n)
+fit2 <- aov(data = df2, Beers ~ BeerCapita_Factor)
+summary(fit2)
+
+#ggally summary visualizations
+df2 %>% select (Beer.Per.Capita, Beers, BeerCapita_Factor) %>% ggpairs(aes(color = BeerCapita_Factor))
+
+```
+
+# Conclusion:
+
+### In summary, we derived the following insights from our analysis:
+
+ 1. Only 19 States had 10 or more unique breweries and 32 states (including DC) have under 10 breweries.
+ 1. Median IBU across the U.S. varies, this could indicate that bitterness could be regional. 
+ 1. In terms of understanding alcohol content it's relatively consistent across beers in which half of the values fall between .05 and .068.
+ 1. There is an apparent relationship between alcohol content and bitterness where as one increases the other tends to as well particularly between an ABV of about .05 and .08.
+ 1. There is no apparent relationship between offering more local beers in a state and consumption of beer (and therefore sales)
+
+### Based on these insights we have the following recommendations that Budweiser can explore in further detail
+
+ 1. It does not appear that there is justification to add additional breweries in states in order to increase demand - unless there is an opportunity to reduce distribution costs.
+ 1. Instead we recommend exploring the opportunity to make and market beers based off of a given state or regions bitterness preference in order to capture more market share in those areas.
+
